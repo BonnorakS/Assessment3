@@ -12,7 +12,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.PostMapping;
 import au.edu.adelaide.Assessment1.model.ShutdownResponse;
 import au.edu.adelaide.Assessment1.service.ShutdownService;
-
+import java.util.Map;
 @RestController
 public class AdminController {
 
@@ -34,6 +34,12 @@ public class AdminController {
 	@GetMapping("/api/v1/global/stats")
 	public StatsResponse getStats() {
 	    return statsService.getStats();
+	}
+	
+	// ADDED: returns total audio duration and transcription time in seconds.
+	@GetMapping("/api/v1/global/usage")
+	public java.util.Map<String, Double> getUsage(){
+		return statsService.getUsage();
 	}
 	
 	@PostMapping("/api/v1/admin/shutdown")

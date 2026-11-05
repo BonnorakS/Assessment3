@@ -26,9 +26,21 @@ public class TranscriptionService {
 		this.statsService = statsService;
 		this.apiKey = System.getenv("OPENAI_API_KEY");
 	}
-	
+	// CHANGED: Return JsonNode to provide the complete Whisper response.
 	public String transcribe(byte[] audioData, String filename) throws IOException{
 		
+		// ADDED: Check that the API key is configured.
+		if (apiKey == null || apiKey.isBlank()) {
+			throw new IllegalStateException("OPENAI_API_KEY is not configured.");
+		}
+		
+		// ADDED: Record when the request starts.
+		statsService.requestStarted();
+		
+		// ADDED: Start measuring transcription processing time.
+		long startTime = System.nanoTime();
+		
+		try {
 		HttpHeaders headers = new HttpHeaders();
 		
 		headers.setContentType(MediaType.MULTIPART_FORM_DATA);
@@ -43,22 +55,87 @@ public class TranscriptionService {
 			}
 		};
 		body.add("file", audioResource);
-		body.add("model", "gpt-4o-mini-transcribe");
-		
+		body.add("model", "whisper-1");
+		// ADDED: Request detailed JSON transcription.
+		body.add("response_format", "verbose_json");
+		// ADDED: Request word-level timestamps.
+		body.add("timestamp_granularities[]", "word");
+		// ADDED: Request segment-level timestamps.
+		body.add("timestamp_granularities[]", "segment");
+		// Send audio to the OpenAI transcription API.
 		String response = restClient.post().uri(TRANSCRIPTION_URL).headers(h -> h.addAll(headers)).body(body).retrieve().body(String.class);
-		
+		// Convert the API response into JSON.
 		JsonNode json = objectMapper.readTree(response);
-		System.out.println("OPENAI RESPONSE:");
-		System.out.println(response);
-		// Read token usage if it is provide by the API response
-		JsonNode usage = json.get("usage");
-		if(usage != null) {
-			long input = usage.path("input_tokens").asLong(0);
-			long output = usage.path("output_tokens").asLong(0);
-			
-			statsService.addTokenUsage(input, output);
-		}
-		return json.get("text").asText();
 		
+		// ADDED: Remove unreliable segments from the transcription.
+		JsonNode segments = json.path("segments");
+		
+		if (segments.isArray()) {
+			com.fasterxml.jackson.databind.node.ArrayNode filteredSegments = objectMapper.createArrayNode();
+			
+			for (JsonNode segment : segments) {
+				// Read Whipser's confidence values.
+				double noSpeechProb = segment.path("no_speech_prob").asDouble(0.0);
+				double avgLogprob = segment.path("avg_logprob").asDouble(0.0);
+				
+				// Remove a segment only when BOTH conditions are true.
+				if (noSpeechProb > 0.6 && avgLogprob < -1.0) {
+					continue;
+				}
+				filteredSegments.add(segment);
+			}
+			 // Replace the original segments with the filtered segments.
+			((com.fasterxml.jackson.databind.node.ObjectNode) json).set("segments", filteredSegments);
+			
+			// ADDED: Keep only words that belong to the remaining segments.
+			JsonNode words = json.path("words");
+			
+			if(words.isArray()) {
+				com.fasterxml.jackson.databind.node.ArrayNode filteredWords = objectMapper.createArrayNode();
+				
+				for (JsonNode word : words) {
+					double wordStart = word.path("start").asDouble(0.0);
+					double wordEnd = word.path("end").asDouble(0.0);
+					
+					// check whether this word overlaps a retained segment.
+					boolean belongsToSegment = false;
+					
+					for (JsonNode segment : filteredSegments) {
+						double segmentStart = segment.path("start").asDouble(0.0);
+						double segmentEnd = segment.path("end").asDouble(0.0);
+						
+						if(wordStart < segmentEnd && wordEnd > segmentStart) {
+							belongsToSegment = true;
+							break;
+						}
+					}
+					// Keep the word only if its segment was retained.
+					if(belongsToSegment) {
+						filteredWords.add(word);
+					}
+				}
+				// Replace the original words with the filtered words.
+				((com.fasterxml.jackson.databind.node.ObjectNode) json).set("words", filteredWords);
+		}
+		
+	}
+		
+		// ADDED: Read the original audio duration in seconds.
+		double audioSeconds = json.path("duration").asDouble(0.0);
+		
+		// ADDED: calculate how long the transcription request took.
+		double elapsedSeconds = (System.nanoTime() - startTime) / 1_000_000_000.0;
+		
+		// ADDED: record successful request and usage information.
+		statsService.requestSucceeded(audioSeconds, elapsedSeconds);
+		
+		// Return the complete JSON, including timestamps.
+		return objectMapper.writeValueAsString(json);
+		
+		}catch (IOException | RuntimeException e) {
+			// ADDED: Record failed transcription requests.
+			statsService.requestFailed();
+			throw e;
+		}
 	}
 }
